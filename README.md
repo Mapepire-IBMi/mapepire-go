@@ -4,7 +4,7 @@
 ## Setup
 ### Install with go get
 ```bash
-go get github.com/deady54/mapepire-go
+go get github.com/Mapepire-IBMi/mapepire-go
 ```
 ### Server Component Setup
 To use mapepire-go, you will need to have the Mapepire Server Component running on your IBM i server. Follow these instructions to set up the server component: [Mapepire Server Installation](https://mapepire-ibmi.github.io/guides/sysadmin/)
@@ -18,7 +18,7 @@ package main
 import (
 	"log"
 
-	mapepire "github.com/deady54/mapepire-go"
+	mapepire "github.com/Mapepire-IBMi/mapepire-go"
 )
 
 func main() {
