@@ -1,4 +1,4 @@
-module github.com/deady54/mapepire-go
+module github.com/Mapepire-IBMi/mapepire-go
 
 go 1.21.0
 
