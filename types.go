@@ -49,8 +49,15 @@ type metadata struct {
 
 // Represents the columns of the DB
 type column struct {
-	Name        string
-	Type        string
-	Label       string
-	DisplaySize int `json:"display_size"`
+	Name          string
+	Type          string
+	Label         string
+	DisplaySize   int `json:"display_size"`
+	Precision     int
+	Scale         int
+	AutoIncrement bool
+	Nullable      int
+	ReadOnly      bool
+	Writeable     bool
+	Table         string
 }
