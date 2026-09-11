@@ -14,6 +14,7 @@ type JobPool struct {
 	jobPool chan *SQLJob   // A channel of SQLJobs managed by the pool
 	options PoolOptions    // Represents the options for configuring a connection pool
 	counter *atomic.Uint32 // Atomic counter
+	closed  atomic.Bool    // Flag to indicate if pool is closed
 }
 
 // Represents the options for configuring a connection pool
@@ -60,6 +61,7 @@ func NewPool(options PoolOptions) (*JobPool, error) {
 		jobPool: jobChannel,
 		counter: &counter,
 		options: options,
+		closed:  atomic.Bool{},
 	}
 	return pool, nil
 }
@@ -101,11 +103,15 @@ func (jp *JobPool) AddJob(s *SQLJob) error {
 	if jp.jobPool == nil {
 		return fmt.Errorf("pool does not exist")
 	}
-	if len(jp.jobPool) >= jp.options.MaxSize {
+	if jp.closed.Load() {
+		return fmt.Errorf("pool is closed")
+	}
+	select {
+	case jp.jobPool <- s:
+		return nil
+	default:
 		return fmt.Errorf("not enough space in the pool")
 	}
-	jp.jobPool <- s
-	return nil
 }
 
 // Execute a SQL query with a job from the pool
@@ -150,6 +156,9 @@ func (jp *JobPool) GetJobCount() int {
 
 // Closes the pool and its jobs
 func (jp *JobPool) Close() {
+	if !jp.closed.CompareAndSwap(false, true) {
+		return
+	}
 	for {
 		select {
 		case job := <-jp.jobPool:
