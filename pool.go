@@ -18,10 +18,10 @@ type JobPool struct {
 
 // Represents the options for configuring a connection pool
 type PoolOptions struct {
-	Creds        DaemonServer // Credentials to connect to the server
-	MaxWaitTime  int          // Max time to wait for a job (in seconds)
-	MaxSize      int          // Pool max size
-	StartingSize int          // Pool starting count
+	Creds        DaemonServer  // Credentials to connect to the server
+	MaxWaitTime  time.Duration // Max time to wait for a job
+	MaxSize      int           // Pool max size
+	StartingSize int           // Pool starting count
 }
 
 // Create a new pool object
@@ -34,8 +34,12 @@ func NewPool(options PoolOptions) (*JobPool, error) {
 		return nil, fmt.Errorf("max size must be greater than or equal to starting size")
 	}
 
-	if options.Creds.Host == "" || options.Creds.Password == "" {
-		return nil, fmt.Errorf("hostname and password required")
+	if options.Creds.Host == "" || options.Creds.User == "" || options.Creds.Password == "" {
+		return nil, fmt.Errorf("hostname, username and password required")
+	}
+
+	if options.MaxWaitTime <= 0 {
+		options.MaxWaitTime = 1 * time.Second
 	}
 
 	jobChannel := make(chan *SQLJob, options.MaxSize)
@@ -71,7 +75,7 @@ func (jp *JobPool) GetJob() (s *SQLJob, err error) {
 			}
 		}
 		return s, nil
-	case <-time.After(time.Duration(jp.options.MaxWaitTime) * time.Second):
+	case <-time.After(jp.options.MaxWaitTime):
 		if jp.GetJobCount() < jp.options.MaxSize {
 			return jp.newPoolJob()
 		}
