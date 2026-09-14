@@ -562,7 +562,7 @@ func TestFetchMore(t *testing.T) {
 	_, query := initSQLTable("SELECT * FROM TEMPTEST", queryops)
 
 	query.Execute()
-	have, _ := query.FetchMore(query.ID, "5")
+	have, _ := query.FetchMore(query.ID, 5)
 
 	want := &ServerResponse{
 		ID:         "3",
@@ -601,7 +601,7 @@ func TestFetchMoreTerse(t *testing.T) {
 	_, query := initSQLTable("SELECT * FROM TEMPTEST", queryops)
 
 	query.Execute()
-	have, _ := query.FetchMore(query.ID, "1")
+	have, _ := query.FetchMore(query.ID, 1)
 
 	want := &ServerResponse{
 		ID:         "3",
@@ -641,7 +641,7 @@ func TestFetchMoreinvalid(t *testing.T) {
 
 	_, query := initSQLTable("SELECT * FROM TEMPTEST", queryops)
 	query.Execute()
-	have, err := query.FetchMore("invalid", "1")
+	have, err := query.FetchMore("invalid", 1)
 
 	want := &ServerResponse{
 		Success:    false,
@@ -667,7 +667,7 @@ func TestFetchMoreInvalid2(t *testing.T) {
 
 	_, query := initSQLTable("SELECT * FROM TEMPTEST", queryops)
 	query.Execute()
-	have, err := query.FetchMore("", "1")
+	have, err := query.FetchMore("", 1)
 
 	want := &ServerResponse{
 		Success:    false,
@@ -691,7 +691,7 @@ func TestFetchMoreinvalid3(t *testing.T) {
 	}
 
 	_, query := initSQLTable("SELECT * FROM TEMPTEST", queryops)
-	have, err := query.FetchMore("5", "1")
+	have, err := query.FetchMore("5", 1)
 
 	want := &ServerResponse{
 		Success:    false,

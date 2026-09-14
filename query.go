@@ -109,7 +109,7 @@ func (q *Query) Execute() (*ServerResponse, error) {
 }
 
 // Fetch more rows from a previous request with the ID
-func (q *Query) FetchMore(contID string, rows string) (*ServerResponse, error) {
+func (q *Query) FetchMore(contID string, rows int) (*ServerResponse, error) {
 	q.job.setJobStatus(JOBSTATUS_BUSY)
 
 	resp := &ServerResponse{
@@ -128,7 +128,7 @@ func (q *Query) FetchMore(contID string, rows string) (*ServerResponse, error) {
 	}
 
 	jsonreq :=
-		fmt.Sprintf(`{"id":"%s","type":"sqlmore","cont_id":"%s","rows":"%s"}`, q.ID, contID, rows)
+		fmt.Sprintf(`{"id":"%s","type":"sqlmore","cont_id":"%s","rows":"%d"}`, q.ID, contID, rows)
 
 	request := &serverRequest{
 		id:      q.ID,
