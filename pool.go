@@ -14,14 +14,15 @@ type JobPool struct {
 	jobPool chan *SQLJob   // A channel of SQLJobs managed by the pool
 	options PoolOptions    // Represents the options for configuring a connection pool
 	counter *atomic.Uint32 // Atomic counter
+	closed  atomic.Bool    // Flag to indicate if pool is closed
 }
 
 // Represents the options for configuring a connection pool
 type PoolOptions struct {
-	Creds        DaemonServer // Credentials to connect to the server
-	MaxWaitTime  int          // Max time to wait for a job (in seconds)
-	MaxSize      int          // Pool max size
-	StartingSize int          // Pool starting count
+	Creds        DaemonServer  // Credentials to connect to the server
+	MaxWaitTime  time.Duration // Max time to wait for a job
+	MaxSize      int           // Pool max size
+	StartingSize int           // Pool starting count
 }
 
 // Create a new pool object
@@ -34,8 +35,12 @@ func NewPool(options PoolOptions) (*JobPool, error) {
 		return nil, fmt.Errorf("max size must be greater than or equal to starting size")
 	}
 
-	if options.Creds.Host == "" || options.Creds.Password == "" {
-		return nil, fmt.Errorf("hostname and password required")
+	if options.Creds.Host == "" || options.Creds.User == "" || options.Creds.Password == "" {
+		return nil, fmt.Errorf("hostname, username and password required")
+	}
+
+	if options.MaxWaitTime <= 0 {
+		options.MaxWaitTime = 1 * time.Second
 	}
 
 	jobChannel := make(chan *SQLJob, options.MaxSize)
@@ -56,6 +61,7 @@ func NewPool(options PoolOptions) (*JobPool, error) {
 		jobPool: jobChannel,
 		counter: &counter,
 		options: options,
+		closed:  atomic.Bool{},
 	}
 	return pool, nil
 }
@@ -71,7 +77,7 @@ func (jp *JobPool) GetJob() (s *SQLJob, err error) {
 			}
 		}
 		return s, nil
-	case <-time.After(time.Duration(jp.options.MaxWaitTime) * time.Second):
+	case <-time.After(jp.options.MaxWaitTime):
 		if jp.GetJobCount() < jp.options.MaxSize {
 			return jp.newPoolJob()
 		}
@@ -97,11 +103,15 @@ func (jp *JobPool) AddJob(s *SQLJob) error {
 	if jp.jobPool == nil {
 		return fmt.Errorf("pool does not exist")
 	}
-	if len(jp.jobPool) >= jp.options.MaxSize {
+	if jp.closed.Load() {
+		return fmt.Errorf("pool is closed")
+	}
+	select {
+	case jp.jobPool <- s:
+		return nil
+	default:
 		return fmt.Errorf("not enough space in the pool")
 	}
-	jp.jobPool <- s
-	return nil
 }
 
 // Execute a SQL query with a job from the pool
@@ -146,6 +156,9 @@ func (jp *JobPool) GetJobCount() int {
 
 // Closes the pool and its jobs
 func (jp *JobPool) Close() {
+	if !jp.closed.CompareAndSwap(false, true) {
+		return
+	}
 	for {
 		select {
 		case job := <-jp.jobPool:
