@@ -80,6 +80,41 @@ options := mapepire.QueryOptions{Parameters: [][]any{{"1264", "Mark"}, {"1265", 
 query, _ := job.QueryWithOptions("INSERT INTO employee (ID, NAME) VALUES (?, ?)", options)
 result, _ := query.Execute()
 ```
+
+### BLOB Values
+BLOB values can be inserted with `NewBlob`. The byte slice is Base64 encoded before it is sent to the Mapepire Server Component. On IBM i, create the BLOB column in a table, for example:
+```sql
+CREATE TABLE qtemp.file_data (
+    id INT NOT NULL,
+    data BLOB(1000000) NOT NULL
+)
+```
+
+Insert a BLOB using a prepared statement:
+```go
+content := []byte("file content")
+options := mapepire.QueryOptions{
+	Parameters: [][]any{{1, mapepire.NewBlob(content)}},
+}
+
+query, _ := job.QueryWithOptions(
+	"INSERT INTO qtemp.file_data (id, data) VALUES (?, ?)",
+	options,
+)
+result, _ := query.Execute()
+```
+
+Selecting a BLOB returns a `BlobRef` containing a temporary URL and the BLOB size. Use `ToBlobRef` and `FetchBlob` to retrieve the original bytes:
+```go
+query, _ := job.Query("SELECT data FROM qtemp.file_data WHERE id = 1")
+result, _ := query.Execute()
+
+blobRef := result.Data[0]["DATA"].ToBlobRef()
+content, _ := job.FetchBlob(blobRef)
+```
+
+The BLOB reference is temporary, so fetch the content while the reference is valid. `content` contains the original byte slice.
+
 ### CL Commands
 CL commands can be easily run by setting the `IsCLcommand` option to be `true` on the `QueryOptions` object or by directly using the `CLCommand` function on a job.
 ```go
