@@ -14,11 +14,7 @@ func (c *ColumnData) UnmarshalJSON(data []byte) error {
 
 // Converts the ColumnData to BlobRef
 // delivers empty BlobRef if not a BlobRef
-func (c *ColumnData) ToBlobRef() BlobRef {
-	if c == nil {
-		return BlobRef{}
-	}
-
+func (c ColumnData) ToBlobRef() BlobRef {
 	data, ok := c.any.(map[string]any)
 	if !ok {
 		return BlobRef{}
