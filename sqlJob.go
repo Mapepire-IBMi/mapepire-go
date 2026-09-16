@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -40,6 +41,8 @@ type SQLJob struct {
 	connection *websocket.Conn // Websocket connection
 	counter    atomic.Uint32   // Atomic counter
 	writeMutex sync.Mutex      // Mutex
+
+	authBasicString string // Basic authorization string
 }
 
 const (
@@ -77,7 +80,8 @@ func (s *SQLJob) Connect(server DaemonServer) error {
 	}
 
 	header := http.Header{}
-	header.Add("authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(server.User+":"+server.Password)))
+	s.authBasicString = "Basic " + base64.StdEncoding.EncodeToString([]byte(server.User+":"+server.Password))
+	header.Add("authorization", s.authBasicString)
 
 	conn, _, err := dialer.Dial(url, header)
 	if err != nil {
@@ -268,6 +272,48 @@ func (s *SQLJob) QueryWithOptions(command string, options QueryOptions) (*Query,
 
 	s.query = query
 	return query, nil
+}
+
+func (s *SQLJob) FetchBlob(blobRef BlobRef) ([]byte, error) {
+	port := s.daemon.Port
+	if port == "" {
+		port = "8076"
+	}
+	url := fmt.Sprintf("https://%s:%s%s", s.daemon.Host, port, blobRef.BlobUrl)
+
+	request, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creating blob request: %v", err)
+	}
+	request.Header.Set("authorization", s.authBasicString)
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if s.daemon.IgnoreUnauthorized {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+
+	response, err := (&http.Client{Transport: transport}).Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching blob: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("blob token not found or expired (404): %s", blobRef.BlobUrl)
+	}
+	if response.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("unauthorized fetching blob - credentials mismatch (401): %s", blobRef.BlobUrl)
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected response fetching blob: HTTP %d for %s", response.StatusCode, blobRef.BlobUrl)
+	}
+
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading blob response: %v", err)
+	}
+
+	return data, nil
 }
 
 // Set trace configuration options

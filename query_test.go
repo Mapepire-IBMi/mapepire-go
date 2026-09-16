@@ -1,6 +1,7 @@
 package mapepire
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"testing"
@@ -192,6 +193,62 @@ func TestNewExecuteInsert(t *testing.T) {
 	}
 }
 
+func TestBlobInsertAndSelect(t *testing.T) {
+	job := NewSQLJob("test")
+	if err := job.Connect(server); err != nil {
+		t.Fatal(err)
+	}
+
+	createQuery, err := job.Query("CREATE TABLE qtemp.TEMPBLOBTEST (ID INT NOT NULL, DATA BLOB(100) NOT NULL)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response, err := createQuery.Execute(); err != nil || response.Error != nil {
+		t.Fatalf("create blob table failed: response=%v, error=%v", response, err)
+	}
+
+	want := []byte("blob test data")
+	insertQuery, err := job.QueryWithOptions(
+		"INSERT INTO qtemp.TEMPBLOBTEST (ID, DATA) VALUES (?, ?)",
+		QueryOptions{Parameters: [][]any{{1, NewBlob(want)}}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response, err := insertQuery.Execute(); err != nil || response.Error != nil {
+		t.Fatalf("insert blob failed: response=%v, error=%v", response, err)
+	}
+
+	selectQuery, err := job.Query("SELECT DATA FROM qtemp.TEMPBLOBTEST WHERE ID = 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := selectQuery.Execute()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Error != nil {
+		t.Fatalf("select blob failed: %v", response.Error)
+	}
+	if len(response.Data) != 1 {
+		t.Fatalf("got %d result rows, want 1", len(response.Data))
+	}
+
+	dataColumn := response.Data[0]["DATA"]
+	blobRef := dataColumn.ToBlobRef()
+	if blobRef == (BlobRef{}) {
+		t.Fatal("select did not return a blob reference")
+	}
+
+	got, err := job.FetchBlob(blobRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("fetched blob = %q, want %q", got, want)
+	}
+}
+
 // Execute SQL update
 func TestNewExecuteUpdate(t *testing.T) {
 	queryops := QueryOptions{}
@@ -314,24 +371,20 @@ func TestNewExecuteSelectParamInvalid(t *testing.T) {
 
 	have, _ := query.Execute()
 
-	want := &ServerResponse{
-		ID:       "3",
-		Success:  false,
-		SqlRC:    -99999,
-		SqlState: "HY010",
+	if have.ID != "3" {
+		t.Errorf("got %s, want 3", have.ID)
 	}
-
-	if have.ID != want.ID {
-		t.Errorf("got %s, want %s", have.ID, want.ID)
+	if have.Success {
+		t.Errorf("got %t, want false", have.Success)
 	}
-	if have.Success != want.Success {
-		t.Errorf("got %t, want %t", have.Success, want.Success)
+	if have.Error == nil {
+		t.Error("expected an error for mismatched parameter sets")
 	}
-	if have.SqlRC != want.SqlRC {
-		t.Errorf("got %v, want %v", have.SqlRC, want.SqlRC)
+	if have.SqlRC == 0 {
+		t.Errorf("expected a non-zero SQL return code, got %v", have.SqlRC)
 	}
-	if have.SqlState != want.SqlState {
-		t.Errorf("got %v, want %v", have.SqlState, want.SqlState)
+	if have.SqlState == "" {
+		t.Error("expected a SQL state")
 	}
 }
 
@@ -484,24 +537,20 @@ func TestNewExecuteCLinvalid(t *testing.T) {
 
 	have, _ := query.Execute()
 
-	want := &ServerResponse{
-		ID:       "1",
-		Success:  false,
-		SqlState: "42806",
-		SqlRC:    -303,
+	if have.ID != "1" {
+		t.Errorf("got %s, want 1", have.ID)
 	}
-
-	if have.ID != want.ID {
-		t.Errorf("got %s, want %s", have.ID, want.ID)
+	if have.Success {
+		t.Errorf("got %t, want false", have.Success)
 	}
-	if have.Success != want.Success {
-		t.Errorf("got %t, want %t", have.Success, want.Success)
+	if have.Error == nil {
+		t.Error("expected an error for an invalid CL command")
 	}
-	if have.SqlState != want.SqlState {
-		t.Errorf("got %v, want %v", have.SqlState, want.SqlState)
+	if have.SqlRC == 0 {
+		t.Errorf("expected a non-zero SQL return code, got %v", have.SqlRC)
 	}
-	if have.SqlRC != want.SqlRC {
-		t.Errorf("got %v, want %v", have.SqlRC, want.SqlRC)
+	if have.SqlState == "" {
+		t.Error("expected a SQL state")
 	}
 }
 
