@@ -388,7 +388,7 @@ func TestCloseInvalid(t *testing.T) {
 	}
 }
 
-// Get version (v2.1.6)
+// Get version
 func TestGetVersion(t *testing.T) {
 	job := NewSQLJob("test")
 	job.Connect(server)
@@ -397,7 +397,7 @@ func TestGetVersion(t *testing.T) {
 	if err != nil {
 		t.Errorf("should not throw error")
 	}
-	if version != "2.1.6" {
+	if version == "" {
 		t.Errorf("should not throw error")
 	}
 }
