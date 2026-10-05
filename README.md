@@ -96,11 +96,31 @@ options := mapepire.PoolOptions{Creds: creds, MaxSize: 5, StartingSize: 3, MaxWa
 pool, _ := mapepire.NewPool(options)
 
 // Initialize and execute query
-resultChan, _ := pool.ExecuteSQL("SELECT * FROM employee")
-result := <-resultChan
+result, _ := pool.ExecuteSQL("SELECT * FROM employee")
+log.Println(result.Data)
 
 // Close pool and jobs
 pool.Close()
+```
+### Timeouts and Error Handling
+Every websocket read is bounded by a per-job read deadline (30s by default). A deadline expiry returns a `TimeoutError` and closes the connection, since the protocol is desynced. Override it per job or per query:
+```go
+// Override the deadline for all queries on this job
+job.SetReadTimeout(60 * time.Second)
+
+// Or set a timeout for a single query via QueryOptions
+options := mapepire.QueryOptions{Timeout: 30 * time.Second}
+result, err := pool.ExecuteSQLWithOptions("SELECT * FROM employee", options)
+```
+A dead DB2 job (SQL state HY017) returns a `DeadJobError`; the job is closed automatically and not returned to the pool. Use `errors.As` to handle these cases:
+```go
+var tErr *mapepire.TimeoutError
+var dErr *mapepire.DeadJobError
+if errors.As(err, &tErr) {
+	// daemon slow or hung - retry
+} else if errors.As(err, &dErr) {
+	// db2 job died - do not retry on the same job
+}
 ```
 ### JDBC Options
 When specifying the credentials in the `DaemonServer` object, JDBC options can be defined in the `Properties` field. For a full list of all options, check out the documentation [here](https://www.ibm.com/docs/en/i/7.4?topic=jdbc-toolbox-java-properties).

@@ -14,6 +14,8 @@ type JobPool struct {
 	jobPool chan *SQLJob   // A channel of SQLJobs managed by the pool
 	options PoolOptions    // Represents the options for configuring a connection pool
 	counter *atomic.Uint32 // Atomic counter
+	closed  atomic.Bool    // Set once Close() has drained the channel
+	mu      sync.Mutex     // Serializes GetJob/AddJob against Close's drain
 }
 
 // Represents the options for configuring a connection pool
@@ -62,17 +64,27 @@ func NewPool(options PoolOptions) (*JobPool, error) {
 
 // Receive a job from the pool
 func (jp *JobPool) GetJob() (s *SQLJob, err error) {
+	if jp.closed.Load() {
+		return nil, fmt.Errorf("pool is closed")
+	}
 	select {
 	case s := <-jp.jobPool:
 		if s.connection == nil {
-			err := s.Connect(jp.options.Creds)
-			if err != nil {
+			if err := s.Connect(jp.options.Creds); err != nil {
+				_ = s.Close()
+				jp.counter.Add(^uint32(0))
 				return nil, err
 			}
 		}
 		return s, nil
 	case <-time.After(time.Duration(jp.options.MaxWaitTime) * time.Second):
+		if jp.closed.Load() {
+			return nil, fmt.Errorf("pool is closed")
+		}
 		if jp.GetJobCount() < jp.options.MaxSize {
+			if jp.closed.Load() {
+				return nil, fmt.Errorf("pool is closed")
+			}
 			return jp.newPoolJob()
 		}
 		return nil, fmt.Errorf("exceeded time limit")
@@ -87,6 +99,8 @@ func (jp *JobPool) newPoolJob() (*SQLJob, error) {
 
 	err := job.Connect(jp.options.Creds)
 	if err != nil {
+		_ = job.Close()
+		jp.counter.Add(^uint32(0))
 		return nil, err
 	}
 	return job, nil
@@ -94,14 +108,26 @@ func (jp *JobPool) newPoolJob() (*SQLJob, error) {
 
 // Add a job back to the pool
 func (jp *JobPool) AddJob(s *SQLJob) error {
-	if jp.jobPool == nil {
-		return fmt.Errorf("pool does not exist")
+	jp.mu.Lock()
+	defer jp.mu.Unlock()
+	if jp.closed.Load() {
+		_ = s.Close()
+		jp.counter.Add(^uint32(0))
+		return fmt.Errorf("pool is closed")
 	}
 	if len(jp.jobPool) >= jp.options.MaxSize {
+		_ = s.Close()
+		jp.counter.Add(^uint32(0))
 		return fmt.Errorf("not enough space in the pool")
 	}
-	jp.jobPool <- s
-	return nil
+	select {
+	case jp.jobPool <- s:
+		return nil
+	default:
+		_ = s.Close()
+		jp.counter.Add(^uint32(0))
+		return fmt.Errorf("not enough space in the pool")
+	}
 }
 
 // Execute a SQL query with a job from the pool
@@ -109,25 +135,30 @@ func (jp *JobPool) ExecuteSQL(sql string) (*ServerResponse, error) {
 	return jp.ExecuteSQLWithOptions(sql, QueryOptions{})
 }
 
-// Execute a SQL query with options, using a job from the pool
+// Execute a SQL query with options, using a job from the pool.
+// A non-zero QueryOptions.Timeout sets the job's websocket read deadline for the query.
 func (jp *JobPool) ExecuteSQLWithOptions(command string, queryops QueryOptions) (*ServerResponse, error) {
 
 	job, err := jp.GetJob()
 	if err != nil {
 		return nil, err
 	}
+	if queryops.Timeout > 0 {
+		job.SetReadTimeout(queryops.Timeout)
+	}
 
 	query, err := job.QueryWithOptions(command, queryops)
 	if err != nil {
+		_ = jp.AddJob(job)
 		return nil, err
 	}
 
 	resp, executeErr := query.Execute()
 
 	var wsErr *WebsocketError
-	if errors.As(executeErr, &wsErr) {
-		job.connection.Close()
-		job.connection = nil
+	var djErr *DeadJobError
+	if errors.As(executeErr, &wsErr) || errors.As(executeErr, &djErr) {
+		_ = job.Close()
 	}
 
 	err = jp.AddJob(job)
@@ -144,15 +175,43 @@ func (jp *JobPool) GetJobCount() int {
 	return int(jp.counter.Load())
 }
 
+// IdleJobs returns the jobs currently sitting idle in the pool
+func (jp *JobPool) IdleJobs() []*SQLJob {
+	if !jp.mu.TryLock() {
+		return nil
+	}
+	defer jp.mu.Unlock()
+	jobs := make([]*SQLJob, 0, len(jp.jobPool))
+	for {
+		select {
+		case j := <-jp.jobPool:
+			jobs = append(jobs, j)
+		default:
+			for _, j := range jobs {
+				jp.jobPool <- j
+			}
+			return jobs
+		}
+	}
+}
+
+// IdleCount returns the number of idle jobs without locking.
+func (jp *JobPool) IdleCount() int { return len(jp.jobPool) }
+
 // Closes the pool and its jobs
 func (jp *JobPool) Close() {
+	if !jp.closed.CompareAndSwap(false, true) {
+		return
+	}
+	jp.mu.Lock()
+	defer jp.mu.Unlock()
 	for {
 		select {
 		case job := <-jp.jobPool:
 			job.Close()
+			jp.counter.Add(^uint32(0))
 			continue
 		default:
-			close(jp.jobPool)
 			return
 		}
 	}

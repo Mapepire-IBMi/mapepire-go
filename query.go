@@ -1,17 +1,20 @@
 package mapepire
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Represents options for query execution
 type QueryOptions struct {
-	Rows        int     // The amount of rows to fetch
-	Parameters  [][]any // Parameters, if any
-	TerseResult bool    // Whether the result returns in terse format
-	IsCLcommand bool    // Whether the command is a CL command
+	Rows        int           // The amount of rows to fetch
+	Parameters  [][]any       // Parameters, if any
+	TerseResult bool          // Whether the result returns in terse format
+	IsCLcommand bool          // Whether the command is a CL command
+	Timeout     time.Duration // Websocket read deadline for this query (0 = default)
 }
 
 // Represents a SQL Query that can be executed and managed within a SQL job
@@ -176,6 +179,8 @@ func (q *Query) sqlCloseUnsafe(contID string) error {
 		return err
 	}
 
+	// mark terminal so validateID rejects it and cleanup() stops re-closing it
+	q.state.Store(STATE_RUN_DONE)
 	return nil
 }
 
@@ -184,6 +189,12 @@ func (q *Query) sendRequest(request *serverRequest) (*ServerResponse, error) {
 	resp, err := q.job.send(*request)
 	if err != nil {
 		q.job.setJobStatus(JOBSTATUS_ERROR)
+		// mark terminal so the query is not reused or retried
+		var wsErr *WebsocketError
+		var tErr *TimeoutError
+		if errors.As(err, &wsErr) || errors.As(err, &tErr) {
+			q.state.Store(STATE_RUN_DONE)
+		}
 		return resp, err
 	}
 

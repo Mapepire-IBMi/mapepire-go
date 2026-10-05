@@ -40,6 +40,8 @@ type SQLJob struct {
 	connection *websocket.Conn // Websocket connection
 	counter    atomic.Uint32   // Atomic counter
 	writeMutex sync.Mutex      // Mutex
+
+	readTimeout atomic.Int64 // per-job read deadline for send(), nanoseconds
 }
 
 const (
@@ -55,10 +57,22 @@ const (
 	MAX_FETCH_SIZE     = 1000
 )
 
+// bounds a single websocket read
+const readDeadline = 30 * time.Second
+
 // Receive a new SQL job with the given ID
 func NewSQLJob(ID string) *SQLJob {
 	list := newQueryList()
-	return &SQLJob{ID: ID, Status: JOBSTATUS_NOT_STARTED, queryList: list}
+	j := &SQLJob{ID: ID, Status: JOBSTATUS_NOT_STARTED, queryList: list}
+	j.readTimeout.Store(int64(readDeadline))
+	return j
+}
+
+// SetReadTimeout overrides the per-job websocket read deadline used by send().
+func (s *SQLJob) SetReadTimeout(d time.Duration) {
+	if d > 0 {
+		s.readTimeout.Store(int64(d))
+	}
 }
 
 // Creates a websocket connection and connects to the server.
@@ -71,6 +85,7 @@ func (s *SQLJob) Connect(server DaemonServer) error {
 
 	url := fmt.Sprintf("wss://%s:%s/db/", server.Host, server.Port)
 	dialer := *websocket.DefaultDialer
+	dialer.HandshakeTimeout = 10 * time.Second
 
 	if server.IgnoreUnauthorized {
 		dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
@@ -125,18 +140,30 @@ func (s *SQLJob) send(req serverRequest) (*ServerResponse, error) {
 	}
 
 	s.writeMutex.Lock()
-	defer s.writeMutex.Unlock()
-	if err := s.connection.WriteMessage(1, []byte(req.jsonreq)); err != nil {
+	conn := s.connection
+	if conn == nil {
+		s.writeMutex.Unlock()
+		return response, &WebsocketError{Method: "send()", Message: "need a connection"}
+	}
+	if err := conn.WriteMessage(1, []byte(req.jsonreq)); err != nil {
+		s.writeMutex.Unlock()
 		msg := "WriteMessage(): " + err.Error()
 		return response, &WebsocketError{Method: "send()", Message: msg}
 	}
 
-	_, resp, err := s.connection.ReadMessage()
+	_ = conn.SetReadDeadline(time.Now().Add(time.Duration(s.readTimeout.Load())))
+	_, resp, err := conn.ReadMessage()
+	s.writeMutex.Unlock()
 	if err != nil {
+		if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() || errors.Is(err, os.ErrDeadlineExceeded) {
+			_ = s.Close()
+			return response, &TimeoutError{Method: "send()", Message: "ReadMessage(): " + err.Error()}
+		}
 		msg := "ReadMessage(): " + err.Error()
 		return response, &WebsocketError{Method: "send()", Message: msg}
 	}
 
+	// checkJsonErr may trigger reconnect(), which takes writeMutex
 	response.SqlRC, response.SqlState, response.Error = checkJsonErr(resp, s)
 	if response.Error != nil {
 		return response, response.Error
@@ -170,12 +197,16 @@ func checkJsonErr(jsonres []byte, job *SQLJob) (int, string, error) {
 
 	json.Unmarshal(jsonres, &checkError)
 	if checkError.Error == "Not connected" {
+		// Caller must not hold writeMutex: reconnect() takes it.
 		isReconnected := job.reconnect()
 		msg := checkError.Error + fmt.Sprintf(" -> reconnected? %v", isReconnected)
 		return checkError.SqlRC, checkError.SqlState, &ServerError{Method: "checkJsonErr()", Message: msg}
 	}
 	if checkError.Error != "" || checkError.SqlState != "" {
 		msg := "json.Unmarshal(): " + checkError.Error
+		if IsDeadJob(checkError.SqlState, checkError.SqlRC) {
+			return checkError.SqlRC, checkError.SqlState, &DeadJobError{Method: "checkJsonErr()", SqlState: checkError.SqlState, SqlRC: checkError.SqlRC}
+		}
 		return checkError.SqlRC, checkError.SqlState, &ServerError{Method: "checkJsonErr()", Message: msg}
 	}
 
@@ -183,6 +214,14 @@ func checkJsonErr(jsonres []byte, job *SQLJob) (int, string, error) {
 }
 
 func (s *SQLJob) reconnect() bool {
+	s.writeMutex.Lock()
+	defer s.writeMutex.Unlock()
+
+	conn := s.connection
+	if conn == nil {
+		return false
+	}
+
 	var jsonreq string
 	if s.daemon.Technique != "" {
 		jsonreq =
@@ -192,17 +231,22 @@ func (s *SQLJob) reconnect() bool {
 			fmt.Sprintf(`{"id":"%v","type":"connect","props":"%v"}`, s.ID, s.daemon.Properties)
 	}
 
-	err := s.connection.WriteMessage(1, []byte(jsonreq))
-	if err != nil {
+	_ = conn.SetWriteDeadline(time.Now().Add(readDeadline))
+	if err := conn.WriteMessage(1, []byte(jsonreq)); err != nil {
 		return false
 	}
 
-	_, resp, err := s.connection.ReadMessage()
+	_ = conn.SetReadDeadline(time.Now().Add(readDeadline))
+	_, resp, err := conn.ReadMessage()
 	if err != nil {
 		return false
 	}
-	_, _, err = checkJsonErr(resp, s)
-	return err == nil
+	// parse directly; checkJsonErr could re-enter reconnect()
+	var checkError struct {
+		Error string
+	}
+	json.Unmarshal(resp, &checkError)
+	return checkError.Error == ""
 }
 
 // Creates a query with the SQL
@@ -298,22 +342,30 @@ func (s *SQLJob) SetTraceConfig(ops TraceOptions) error {
 	}
 
 	s.writeMutex.Lock()
-	err := s.connection.WriteMessage(1, []byte(jsonreq))
+	conn := s.connection
+	if conn == nil {
+		s.writeMutex.Unlock()
+		return &WebsocketError{Method: "SetTraceConfig()", Message: "need a connection"}
+	}
+	err := conn.WriteMessage(1, []byte(jsonreq))
 	if err != nil {
+		s.writeMutex.Unlock()
 		msg := "WriteMessage(): " + err.Error()
 		return &WebsocketError{Method: "SetTraceConfig()", Message: msg}
 	}
 
-	_, resp, err := s.connection.ReadMessage()
+	_ = conn.SetReadDeadline(time.Now().Add(readDeadline))
+	_, resp, err := conn.ReadMessage()
+	s.writeMutex.Unlock()
 	if err != nil {
 		msg := "ReadMessage(): " + err.Error()
 		return &WebsocketError{Method: "SetTraceConfig()", Message: msg}
 	}
+	// checkJsonErr may trigger reconnect(), which takes writeMutex.
 	_, _, err = checkJsonErr(resp, s)
 	if err != nil {
 		return err
 	}
-	s.writeMutex.Unlock()
 
 	trace := &TraceOptions{}
 	err = json.Unmarshal(resp, trace)
@@ -343,12 +395,15 @@ func (s *SQLJob) GetTraceData() error {
 	s.writeMutex.Lock()
 	err := s.connection.WriteMessage(1, []byte(jsonreq))
 	if err != nil {
+		s.writeMutex.Unlock()
 		msg := "WriteMessage(): " + err.Error()
-		return &WebsocketError{Method: "GetTraceData()", Message: msg}
+		return &WebsocketError{Method: "SetTraceConfig()", Message: msg}
 	}
 
+	_ = s.connection.SetReadDeadline(time.Now().Add(readDeadline))
 	_, resp, err := s.connection.ReadMessage()
 	if err != nil {
+		s.writeMutex.Unlock()
 		msg := "ReadMessage(): " + err.Error()
 		return &WebsocketError{Method: "GetTraceData()", Message: msg}
 	}
@@ -410,23 +465,17 @@ func createTraceFile(t traceData) error {
 
 // Closes the SQL job and websocket connection.
 func (s *SQLJob) Close() error {
+	s.writeMutex.Lock()
+	defer s.writeMutex.Unlock()
+
 	if s.connection == nil {
 		return &WebsocketError{Method: "Close()", Message: "need a connection"}
 	}
 
 	s.setJobStatus(JOBSTATUS_ENDED)
-	s.writeMutex.Lock()
-	defer s.writeMutex.Unlock()
 
-	err := s.connection.WriteMessage(1, []byte(`{"id":"bye","type":"exit"}`))
-	if err != nil {
-		msg := "WriteMessage(): " + err.Error()
-		return &WebsocketError{Method: "Close()", Message: msg}
-	}
-	err = s.connection.Close()
-	if err != nil {
-		return fmt.Errorf("error closing connection: %v", err)
-	}
+	_ = s.connection.WriteMessage(1, []byte(`{"id":"bye","type":"exit"}`))
+	_ = s.connection.Close()
 
 	s.connection = nil
 	s.Options = nil
@@ -449,12 +498,15 @@ func (s *SQLJob) GetVersion() (string, error) {
 	s.writeMutex.Lock()
 	err := s.connection.WriteMessage(1, []byte(jsonreq))
 	if err != nil {
+		s.writeMutex.Unlock()
 		msg := "WriteMessage(): " + err.Error()
 		return "", &WebsocketError{Method: "GetVersion()", Message: msg}
 	}
 
+	_ = s.connection.SetReadDeadline(time.Now().Add(readDeadline))
 	_, resp, err := s.connection.ReadMessage()
 	if err != nil {
+		s.writeMutex.Unlock()
 		msg := "ReadMessage(): " + err.Error()
 		return "", &WebsocketError{Method: "GetVersion()", Message: msg}
 	}
