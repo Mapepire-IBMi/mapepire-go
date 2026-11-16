@@ -64,7 +64,7 @@ func NewPool(options PoolOptions) (*JobPool, error) {
 func (jp *JobPool) GetJob() (s *SQLJob, err error) {
 	select {
 	case s := <-jp.jobPool:
-		if s.connection == nil {
+		if !s.isConnected() {
 			err := s.Connect(jp.options.Creds)
 			if err != nil {
 				return nil, err
@@ -126,8 +126,7 @@ func (jp *JobPool) ExecuteSQLWithOptions(command string, queryops QueryOptions) 
 
 	var wsErr *WebsocketError
 	if errors.As(executeErr, &wsErr) {
-		job.connection.Close()
-		job.connection = nil
+		job.dropConnection()
 	}
 
 	err = jp.AddJob(job)

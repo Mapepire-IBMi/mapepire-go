@@ -38,6 +38,7 @@ type traceData struct {
 type serverRequest struct {
 	id      string
 	jsonreq string
+	terse   bool // Whether the response data is in terse format
 }
 
 // Represents metadata of the DB
