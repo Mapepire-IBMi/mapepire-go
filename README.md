@@ -114,6 +114,25 @@ creds := mapepire.DaemonServer{
 		Properties:         "prompt=false;translate binary=true;naming=system"
 	}
 ```
+### Timeouts and Cancellation
+Set `Timeout` on the `DaemonServer` object to bound the websocket handshake and every request. A request that times out returns an error matching `context.DeadlineExceeded`, and the job stays usable.
+```go
+creds := mapepire.DaemonServer{
+		Host:     "HOST",
+		User:     "USER",
+		Password: "PASS",
+		Timeout:  30 * time.Second,
+	}
+```
+For control over a single call, use the `Context` variants: `ConnectContext`, `ExecuteContext`, `FetchMoreContext`, `SQLCloseContext`, `GetVersionContext`, `SetTraceConfigContext` and `GetTraceDataContext`.
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+result, err := query.ExecuteContext(ctx)
+```
+### Concurrency
+A `SQLJob` is safe for concurrent use. Several goroutines can run queries on the same job at once, and each one receives its own response. Use `GetStatus()` instead of reading the `Status` field while other goroutines are using the job.
+
 ### Tracing Options
 Tracing can be achieved by setting the configuration level and destination of the same tracer.
 

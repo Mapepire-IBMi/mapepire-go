@@ -1,6 +1,7 @@
 package mapepire
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,7 @@ const (
 	STATE_RUN_DONE = iota
 	STATE_RUN_MORE_DATA
 	STATE_NOT_YET_RUN
+	STATE_RUNNING
 )
 
 // Receive a new query list
@@ -65,7 +67,7 @@ func (ql *queryList) validateID(ID string) bool {
 }
 
 // cleans up the query list
-func (ql *queryList) cleanup() {
+func (ql *queryList) cleanup(ctx context.Context) {
 	ql.lock.Lock()
 	defer ql.lock.Unlock()
 
@@ -74,7 +76,7 @@ func (ql *queryList) cleanup() {
 		if query.state.Load() != STATE_RUN_DONE {
 			newList = append(newList, query)
 		} else {
-			query.sqlCloseUnsafe(query.ID)
+			query.sqlCloseUnsafe(ctx, query.ID)
 		}
 	}
 	ql.list = newList
@@ -82,11 +84,20 @@ func (ql *queryList) cleanup() {
 
 // Executes the query/command and returns the results
 func (q *Query) Execute() (*ServerResponse, error) {
+	return q.ExecuteContext(context.Background())
+}
+
+// Executes the query/command and returns the results.
+// The context bounds how long to wait for the server's response.
+func (q *Query) ExecuteContext(ctx context.Context) (*ServerResponse, error) {
 	q.job.setJobStatus(JOBSTATUS_BUSY)
 
-	if q.state.Load() != STATE_NOT_YET_RUN {
+	if !q.state.CompareAndSwap(STATE_NOT_YET_RUN, STATE_RUNNING) {
 		q.job.setJobStatus(JOBSTATUS_ERROR)
 		err := fmt.Errorf("statement has already been run")
+		if q.state.Load() == STATE_RUNNING {
+			err = fmt.Errorf("statement is already running")
+		}
 		return &ServerResponse{ID: q.ID}, err
 	}
 
@@ -103,13 +114,24 @@ func (q *Query) Execute() (*ServerResponse, error) {
 	request := &serverRequest{
 		id:      q.ID,
 		jsonreq: jsonreq,
+		terse:   q.terse,
 	}
 
-	return q.sendRequest(request)
+	resp, err := q.sendRequest(ctx, request)
+	if err != nil {
+		// Allow the statement to be retried
+		q.state.CompareAndSwap(STATE_RUNNING, STATE_NOT_YET_RUN)
+	}
+	return resp, err
 }
 
 // Fetch more rows from a previous request with the ID
 func (q *Query) FetchMore(contID string, rows string) (*ServerResponse, error) {
+	return q.FetchMoreContext(context.Background(), contID, rows)
+}
+
+// Fetch more rows from a previous request with the ID
+func (q *Query) FetchMoreContext(ctx context.Context, contID string, rows string) (*ServerResponse, error) {
 	q.job.setJobStatus(JOBSTATUS_BUSY)
 
 	resp := &ServerResponse{
@@ -121,7 +143,7 @@ func (q *Query) FetchMore(contID string, rows string) (*ServerResponse, error) {
 		q.job.setJobStatus(JOBSTATUS_ERROR)
 		err := fmt.Errorf("need ID from previous SQL")
 		return resp, err
-	} else if q.state.Load() == STATE_NOT_YET_RUN {
+	} else if state := q.state.Load(); state == STATE_NOT_YET_RUN || state == STATE_RUNNING {
 		q.job.setJobStatus(JOBSTATUS_ERROR)
 		err := fmt.Errorf("statement has not yet been run")
 		return resp, err
@@ -133,9 +155,10 @@ func (q *Query) FetchMore(contID string, rows string) (*ServerResponse, error) {
 	request := &serverRequest{
 		id:      q.ID,
 		jsonreq: jsonreq,
+		terse:   q.terse,
 	}
 
-	response, err := q.sendRequest(request)
+	response, err := q.sendRequest(ctx, request)
 	if err != nil {
 		return resp, err
 	}
@@ -149,6 +172,11 @@ func (q *Query) FetchMore(contID string, rows string) (*ServerResponse, error) {
 // Close cursor from a previous request.
 // Select querys are automatically closed after fetching all data.
 func (q *Query) SQLClose(contID string) error {
+	return q.SQLCloseContext(context.Background(), contID)
+}
+
+// Close cursor from a previous request.
+func (q *Query) SQLCloseContext(ctx context.Context, contID string) error {
 
 	valid := q.job.queryList.validateID(contID)
 	if !valid {
@@ -156,11 +184,11 @@ func (q *Query) SQLClose(contID string) error {
 		return fmt.Errorf("need ID from previous query")
 	}
 
-	return q.sqlCloseUnsafe(contID)
+	return q.sqlCloseUnsafe(ctx, contID)
 }
 
 // Close cursor from a previous request without validating existence of contID
-func (q *Query) sqlCloseUnsafe(contID string) error {
+func (q *Query) sqlCloseUnsafe(ctx context.Context, contID string) error {
 	q.job.setJobStatus(JOBSTATUS_BUSY)
 	jsonreq :=
 		fmt.Sprintf(`{"id":"%v","type":"sqlclose","cont_id":"%v"}`, q.ID, contID)
@@ -170,7 +198,7 @@ func (q *Query) sqlCloseUnsafe(contID string) error {
 		jsonreq: jsonreq,
 	}
 
-	_, err := q.job.send(*request)
+	_, err := q.job.send(ctx, *request)
 	if err != nil {
 		q.job.setJobStatus(JOBSTATUS_ERROR)
 		return err
@@ -180,8 +208,8 @@ func (q *Query) sqlCloseUnsafe(contID string) error {
 }
 
 // sends the request and sets the query state
-func (q *Query) sendRequest(request *serverRequest) (*ServerResponse, error) {
-	resp, err := q.job.send(*request)
+func (q *Query) sendRequest(ctx context.Context, request *serverRequest) (*ServerResponse, error) {
+	resp, err := q.job.send(ctx, *request)
 	if err != nil {
 		q.job.setJobStatus(JOBSTATUS_ERROR)
 		return resp, err
@@ -192,7 +220,7 @@ func (q *Query) sendRequest(request *serverRequest) (*ServerResponse, error) {
 	} else if resp.Success && !resp.IsDone {
 		q.state.Store(STATE_RUN_MORE_DATA)
 	}
-	q.job.queryList.cleanup()
+	q.job.queryList.cleanup(ctx)
 
 	q.job.setJobStatus(JOBSTATUS_READY)
 	return resp, nil
