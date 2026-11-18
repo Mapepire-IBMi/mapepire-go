@@ -127,18 +127,21 @@ func (s *SQLJob) send(req serverRequest) (*ServerResponse, error) {
 	s.writeMutex.Lock()
 	defer s.writeMutex.Unlock()
 	if err := s.connection.WriteMessage(1, []byte(req.jsonreq)); err != nil {
+		s.setJobStatus(JOBSTATUS_ERROR)
 		msg := "WriteMessage(): " + err.Error()
 		return response, &WebsocketError{Method: "send()", Message: msg}
 	}
 
 	_, resp, err := s.connection.ReadMessage()
 	if err != nil {
+		s.setJobStatus(JOBSTATUS_ERROR)
 		msg := "ReadMessage(): " + err.Error()
 		return response, &WebsocketError{Method: "send()", Message: msg}
 	}
 
 	response.SqlRC, response.SqlState, response.Error = checkJsonErr(resp, s)
 	if response.Error != nil {
+		s.setJobStatus(JOBSTATUS_ERROR)
 		return response, response.Error
 	}
 

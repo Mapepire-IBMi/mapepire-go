@@ -73,6 +73,7 @@ func (jp *JobPool) GetJob() (s *SQLJob, err error) {
 		if s.connection == nil {
 			err := s.Connect(jp.options.Creds)
 			if err != nil {
+				jp.AddJob(s)
 				return nil, err
 			}
 		}
@@ -112,6 +113,11 @@ func (jp *JobPool) AddJob(s *SQLJob) error {
 	default:
 		return fmt.Errorf("not enough space in the pool")
 	}
+	if s.Status == JOBSTATUS_ERROR {
+		s.connection = nil
+	}
+	jp.jobPool <- s
+	return nil
 }
 
 // Execute a SQL query with a job from the pool
